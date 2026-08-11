@@ -122,17 +122,69 @@ def style_and_export(sheets: dict) -> bytes:
 st.title("📦 نظام تحليل مخازن المقاولات")
 st.caption("ارفع شيت الإكسيل بتاع حركة المخازن، والنظام يطلعلك الراكد والتنبؤ بالنفاذ تلقائيًا")
 
-uploaded = st.file_uploader("ارفع ملف الإكسيل (لازم يحتوي أعمدة: التاريخ، المخزن، اسم الصنف، نوع الحركة، الكمية، سعر الوحدة)", type=["xlsx"])
+uploaded = st.file_uploader("ارفع ملف الإكسيل", type=["xlsx"])
+
+# خرائط الأعمدة المدعومة: كل خريطة بتمثل صيغة ملف مختلفة (زي تصدير Dynamics 365)
+COLUMN_PROFILES = {
+    "الصيغة القياسية (التاريخ، المخزن، اسم الصنف...)": {
+        "date": "التاريخ", "warehouse": "المخزن", "item": "اسم الصنف",
+        "qty": "الكمية", "move_type": "نوع الحركة", "unit_price": "سعر الوحدة",
+    },
+    "تصدير Dynamics 365 (Physical date, Warehouse, Description...)": {
+        "date": "Physical date", "warehouse": "Warehouse", "item": "Description",
+        "qty": "Quantity", "move_type": None, "unit_price": None,
+        "cost_amount": "Physical cost amount",
+    },
+}
+
+
+def normalize_columns(raw: pd.DataFrame, profile: dict) -> pd.DataFrame:
+    """يحول أي صيغة ملف للصيغة الداخلية القياسية اللي المحرك شغال بيها"""
+    df = pd.DataFrame()
+    df["التاريخ"] = pd.to_datetime(raw[profile["date"]])
+    df["المخزن"] = raw[profile["warehouse"]].astype(str)
+    df["اسم الصنف"] = raw[profile["item"]].astype(str).str.strip()
+
+    qty_raw = pd.to_numeric(raw[profile["qty"]], errors="coerce").fillna(0)
+
+    if profile.get("move_type"):
+        df["نوع الحركة"] = raw[profile["move_type"]]
+        df["الكمية"] = qty_raw.abs()
+    else:
+        # مفيش عمود نوع حركة صريح — نستنتجه من إشارة الكمية
+        # موجب = استلام (دخول للمخزن) / سالب = صرف (خروج من المخزن)
+        df["نوع الحركة"] = qty_raw.apply(lambda x: "استلام" if x >= 0 else "صرف")
+        df["الكمية"] = qty_raw.abs()
+
+    if profile.get("unit_price"):
+        df["سعر الوحدة"] = pd.to_numeric(raw[profile["unit_price"]], errors="coerce").fillna(0)
+    elif profile.get("cost_amount"):
+        cost = pd.to_numeric(raw[profile["cost_amount"]], errors="coerce").fillna(0).abs()
+        df["سعر الوحدة"] = (cost / df["الكمية"].replace(0, pd.NA)).fillna(0)
+    else:
+        df["سعر الوحدة"] = 0
+
+    return df[df["الكمية"] > 0].reset_index(drop=True)
+
 
 if uploaded:
-    raw = pd.read_excel(uploaded)
-    required_cols = {"التاريخ", "المخزن", "اسم الصنف", "نوع الحركة", "الكمية", "سعر الوحدة"}
-    missing = required_cols - set(raw.columns)
+    raw_original = pd.read_excel(uploaded)
+    st.subheader("0️⃣ اختار صيغة الأعمدة")
+    profile_name = st.selectbox("شكل الأعمدة في ملفك إيه؟", options=list(COLUMN_PROFILES.keys()), index=1)
+    profile = COLUMN_PROFILES[profile_name]
+
+    missing = [v for k, v in profile.items() if v and k != "cost_amount" and v not in raw_original.columns]
+    # تحقق أدق: بس من الأعمدة الأساسية المطلوبة فعليًا لهذا البروفايل
+    required_keys = ["date", "warehouse", "item", "qty"]
+    missing = [profile[k] for k in required_keys if profile[k] not in raw_original.columns]
     if missing:
         st.error(f"الملف ناقصه الأعمدة دي: {missing}")
         st.stop()
 
-    st.success(f"تم رفع {len(raw)} حركة بنجاح")
+    raw = normalize_columns(raw_original, profile)
+    st.success(f"تم تجهيز {len(raw)} حركة بنجاح من أصل {len(raw_original)} صف")
+    with st.expander("👀 شوف عينة من البيانات بعد التحويل"):
+        st.dataframe(raw.head(10), use_container_width=True)
 
     # مراجعة الأصناف المتشابهة
     st.subheader("1️⃣ مراجعة الأصناف المحتمل تكررها")
