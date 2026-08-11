@@ -217,23 +217,32 @@ def run_fifo_engine(df: pd.DataFrame, today: pd.Timestamp) -> pd.DataFrame:
 
 def build_value_by_site_status(batch_df: pd.DataFrame) -> pd.DataFrame:
     """تقرير: إجمالي قيمة المخزون حسب المشروع (Site) وحالة الدفعة (Status)"""
-    pivot = batch_df.pivot_table(index="Site", columns="Status", values="Remaining Value",
-                                  aggfunc="sum", fill_value=0)
+    df = batch_df.copy()
+    df["Site"] = df["Site"].astype(str).fillna("")
+    pivot = df.pivot_table(index="Site", columns="Status", values="Remaining Value",
+                            aggfunc="sum", fill_value=0)
     pivot["Grand Total"] = pivot.sum(axis=1)
     return pivot.reset_index()
 
 
 def build_detailed_status_matrix(batch_df: pd.DataFrame) -> pd.DataFrame:
     """تقرير تفصيلي: لكل صنف/موقع، الكمية والقيمة مقسمة على أعمدة كل حالة"""
+    df = batch_df.copy()
     group_cols = ["Site", "Item", "Variant", "Description", "Unit",
                   "Dimension 1", "Dimension 2", "Dimension 3", "Dimension 4", "Dimension 5"]
-    qty_pivot = batch_df.pivot_table(index=group_cols, columns="Status", values="Remaining Qty",
-                                      aggfunc="sum", fill_value=0)
-    val_pivot = batch_df.pivot_table(index=group_cols, columns="Status", values="Remaining Value",
-                                      aggfunc="sum", fill_value=0)
+    # توحيد النوع لنص عشان نتجنب خطأ الترتيب لما تكون الأعمدة فيها خليط أرقام/نصوص/فاضي
+    for c in group_cols:
+        df[c] = df[c].astype(str).replace({"nan": "", "None": ""}).fillna("")
+
+    qty_pivot = df.pivot_table(index=group_cols, columns="Status", values="Remaining Qty",
+                                aggfunc="sum", fill_value=0)
+    val_pivot = df.pivot_table(index=group_cols, columns="Status", values="Remaining Value",
+                                aggfunc="sum", fill_value=0)
     qty_pivot.columns = [f"{c} - Qty" for c in qty_pivot.columns]
     val_pivot.columns = [f"{c} - Value" for c in val_pivot.columns]
     merged = qty_pivot.join(val_pivot).reset_index()
-    merged["Total Qty"] = batch_df.groupby(group_cols)["Remaining Qty"].sum().values
-    merged["Total Value"] = batch_df.groupby(group_cols)["Remaining Value"].sum().values
+
+    totals = df.groupby(group_cols)[["Remaining Qty", "Remaining Value"]].sum().reset_index()
+    merged = merged.merge(totals, on=group_cols, how="left")
+    merged = merged.rename(columns={"Remaining Qty": "Total Qty", "Remaining Value": "Total Value"})
     return merged
